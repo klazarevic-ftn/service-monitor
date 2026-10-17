@@ -147,3 +147,35 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules/
+
+# SvelteKit specific generated directories
+/.svelte-kit/
+/build/
+/package/
+
+# Vite build timestamp files
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Deployment outputs (depending on your hosting provider / adapter)
+.vercel
+.netlify
+.cloudflare
+.output/
+
+# Testing & Coverage
+/test-results/
+.vitest/
+coverage/
+
+# Environment variables (DO NOT commit sensitive keys)
+.env
+.env.*
+!.env.example

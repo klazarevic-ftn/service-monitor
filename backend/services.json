@@ -1,0 +1,40 @@
+{
+  "services": [
+    {
+      "name": "user",
+      "displayName": "User Service",
+      "port": 8081,
+      "workingDirectory": "F:\\Faks\\Projekti\\tiseo\\backend\\user"
+    },
+    {
+      "name": "studies",
+      "displayName": "Studies Service",
+      "port": 8082,
+      "workingDirectory": "F:\\Faks\\Projekti\\tiseo\\backend\\studies"
+    },
+    {
+      "name": "scheduling",
+      "displayName": "Scheduling Service",
+      "port": 8083,
+      "workingDirectory": "F:\\Faks\\Projekti\\tiseo\\backend\\scheduling"
+    },
+    {
+      "name": "assessment",
+      "displayName": "Assessment Service",
+      "port": 8084,
+      "workingDirectory": "F:\\Faks\\Projekti\\tiseo\\backend\\assessment"
+    },
+    {
+      "name": "payment",
+      "displayName": "Payment Service",
+      "port": 8085,
+      "workingDirectory": "F:\\Faks\\Projekti\\tiseo\\backend\\payment"
+    },
+    {
+      "name": "filesharing",
+      "displayName": "File Sharing Service",
+      "port": 8086,
+      "workingDirectory": "F:\\Faks\\Projekti\\tiseo\\backend\\filesharing"
+    }
+  ]
+}
