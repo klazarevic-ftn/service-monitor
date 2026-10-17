@@ -282,6 +282,41 @@ app.post("/api/services/control", async (req, res) => {
 });
 
 // Start server
+// Graceful shutdown
+
+let shuttingDown = false;
+
+async function shutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    console.log("Stopping Service Monitor and managed services...");
+
+    const managedServices = services.filter(
+        service => processes.has(service.name)
+    );
+
+    const results = await Promise.allSettled(
+        managedServices.map(service => stopService(service))
+    );
+
+    results.forEach((result, index) => {
+        if (result.status === "rejected") {
+            console.error(
+                `[${managedServices[index].name}] Shutdown failed:`,
+                result.reason.message
+            );
+        }
+    });
+
+    console.log("Service Monitor shutdown complete.");
+    process.exit(results.some(r => r.status === "rejected") ? 1 : 0);
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+// Main API server
 
 app.listen(PORT, HOST, () => {
     console.log(
@@ -290,3 +325,19 @@ app.listen(PORT, HOST, () => {
 
     console.log(`Configured services: ${services.length}`);
 });
+
+// Local-only shutdown server, not exposed through Vite
+
+const shutdownServer = require("node:http").createServer((req, res) => {
+    if (req.method !== "POST" || req.url !== "/shutdown") {
+        res.writeHead(404);
+        return res.end();
+    }
+
+    res.writeHead(200);
+    res.end("Shutting down");
+
+    setImmediate(shutdown);
+});
+
+shutdownServer.listen(3001, "127.0.0.1");
