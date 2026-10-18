@@ -1,17 +1,14 @@
-
 const express = require("express");
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawn, execFile } = require("node:child_process");
+const { spawn } = require("node:child_process");
 
 const app = express();
-
 const PORT = 3000;
 const HOST = "127.0.0.1";
 const HEALTH_INTERVAL = 3000;
 
 app.use(express.json());
-
 app.use((req, res, next) => {
     console.log(`${req.method} ${req.url}`);
     next();
@@ -21,323 +18,212 @@ const { services } = JSON.parse(
     fs.readFileSync(path.join(__dirname, "services.json"), "utf8")
 );
 
-const processes = new Map();
 const statuses = new Map();
 const busy = new Set();
+let shuttingDown = false;
 
 for (const service of services) {
     statuses.set(service.name, "unknown");
 }
 
-// Health monitoring
+function pidFile(service) {
+    return path.join(
+        service.workingDirectory,
+        "scripts", "run", `${service.name}.pid.json`
+    );
+}
+
+function managedPid(service) {
+    try {
+        const entry = JSON.parse(
+            fs.readFileSync(pidFile(service), "utf8").replace(/^\uFEFF/, "")
+        );
+        const pid = Number(entry.Pid);
+        if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+        process.kill(pid, 0); // Test existence; does not kill the process.
+        return pid;
+    } catch (error) {
+        if (error.code !== "ENOENT") {
+            console.error(`[${service.name}] PID check failed:`, error);
+        }
+
+        return null;
+    }
+}
+
+console.log(
+    "USER PID CHECK:",
+    managedPid(services.find(s => s.name === "user"))
+);
 
 async function checkHealth(service) {
     try {
         const response = await fetch(
             `http://127.0.0.1:${service.port}/actuator/health`,
-            {
-                signal: AbortSignal.timeout(2000)
-            }
+            { signal: AbortSignal.timeout(2000) }
         );
-
-        if (!response.ok) {
-            return "unhealthy";
-        }
-
+        if (!response.ok) return "unhealthy";
         const health = await response.json();
-
-        return health.status === "UP"
-            ? "healthy"
-            : "unhealthy";
-
+        return health.status === "UP" ? "healthy" : "unhealthy";
     } catch {
         return "offline";
     }
 }
 
 async function updateStatuses() {
-    await Promise.all(
-        services.map(async service => {
-            const status = await checkHealth(service);
-            statuses.set(service.name, status);
-        })
-    );
+    await Promise.all(services.map(async service => {
+        const status = await checkHealth(service);
+        statuses.set(service.name, status);
+    }));
 }
 
-setInterval(updateStatuses, HEALTH_INTERVAL);
+const healthTimer = setInterval(updateStatuses, HEALTH_INTERVAL);
 updateStatuses();
 
-// Process management
-
-function startService(service) {
-    if (processes.has(service.name)) {
-        throw new Error("Service is already managed");
+function runScript(service, scriptName) {
+    const scriptPath = path.join(service.workingDirectory, "scripts", scriptName);
+    if (!fs.existsSync(scriptPath)) {
+        return Promise.reject(new Error(`Script not found: ${scriptPath}`));
     }
 
-    const wrapper = path.join(
-        service.workingDirectory,
-        "mvnw.cmd"
-    );
-
-    if (!fs.existsSync(wrapper)) {
-        throw new Error(`Maven wrapper not found: ${wrapper}`);
-    }
-
-    const child = spawn(
-        "cmd.exe",
-        ["/d", "/s", "/c", "mvnw.cmd spring-boot:run"],
-        {
-            cwd: service.workingDirectory,
-            env: {
-                ...process.env,
-                SERVER_PORT: String(service.port)
-            },
-            stdio: "inherit",
-            windowsHide: true
-        }
-    );
-
-    if (!child.pid) {
-        throw new Error("Failed to launch service");
-    }
-
-    const pid = child.pid;
-
-    processes.set(service.name, pid);
-    statuses.set(service.name, "starting");
-
-    child.on("error", error => {
-        console.error(
-            `[${service.name}] Process error:`,
-            error.message
-        );
-
-        if (processes.get(service.name) === pid) {
-            processes.delete(service.name);
-        }
-    });
-
-    child.on("exit", (code, signal) => {
-        console.log(
-            `[${service.name}] Process exited:`,
-            code ?? signal
-        );
-
-        if (processes.get(service.name) === pid) {
-            processes.delete(service.name);
-        }
-    });
-
-    console.log(
-        `[${service.name}] Started PID ${pid}, port ${service.port}`
-    );
-
-    return pid;
-}
-
-function stopService(service) {
     return new Promise((resolve, reject) => {
-        const pid = processes.get(service.name);
-
-        if (!pid) {
-            return reject(
-                new Error("No managed process found")
-            );
-        }
-
-        execFile(
-            "taskkill",
-            ["/PID", String(pid), "/T", "/F"],
-            (error, stdout, stderr) => {
-                if (error) {
-                    return reject(
-                        new Error(stderr.trim() || error.message)
-                    );
-                }
-
-                if (processes.get(service.name) === pid) {
-                    processes.delete(service.name);
-                }
-
-                statuses.set(service.name, "stopping");
-
-                console.log(
-                    `[${service.name}] Stopped PID ${pid}`
-                );
-
-                resolve();
+        const child = spawn(
+            "powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+            {
+                cwd: service.workingDirectory,
+                windowsHide: true,
+                stdio: ["ignore", "pipe", "pipe"]
             }
         );
+        let errorOutput = "";
+        child.stdout.on("data", chunk => {
+            process.stdout.write(`[${service.name}] ${chunk}`);
+        });
+        child.stderr.on("data", chunk => {
+            errorOutput += chunk;
+            process.stderr.write(`[${service.name}] ${chunk}`);
+        });
+        child.once("error", reject);
+        child.once("exit", code => {
+            if (code === 0) resolve();
+            else reject(new Error(
+                `${scriptName} failed (exit ${code}). ${errorOutput.trim()}`.trim()
+            ));
+        });
     });
+}
+
+async function startService(service) {
+    // start.ps1 resets DB, starts Maven, waits for health, then seeds data.
+    await runScript(service, "start.ps1");
+    return managedPid(service);
+}
+
+async function stopService(service) {
+    await runScript(service, "stop.ps1");
 }
 
 async function waitUntilOffline(service, timeout = 10000) {
     const deadline = Date.now() + timeout;
-
     while (Date.now() < deadline) {
-        const status = await checkHealth(service);
-
-        if (status === "offline") {
-            return;
-        }
-
+        if ((await checkHealth(service)) === "offline") return;
         await new Promise(resolve => setTimeout(resolve, 500));
     }
-
-    throw new Error(
-        `Service ${service.name} is still responding on port ${service.port}`
-    );
+    throw new Error(`Service ${service.name} is still responding on port ${service.port}`);
 }
 
-// API: List services
-
 app.get("/api/services", (req, res) => {
-    res.json(
-        services.map(service => ({
+    res.json(services.map(service => {
+        const pid = managedPid(service);
+        const operation = busy.has(service.name);
+        return {
             name: service.name,
             displayName: service.displayName,
             port: service.port,
-            status: statuses.get(service.name),
-            pid: processes.get(service.name) ?? null,
-            managed: processes.has(service.name)
-        }))
-    );
+            status: operation ? "initializing" : statuses.get(service.name),
+            pid,
+            managed: pid !== null
+        };
+    }));
 });
 
-// API: Control services
-
 app.post("/api/services/control", async (req, res) => {
+    if (shuttingDown) {
+        return res.status(503).json({ error: "Monitor is shutting down" });
+    }
     const { name, command } = req.body ?? {};
-
-    const service = services.find(
-        service => service.name === name
-    );
-
-    if (!service) {
-        return res.status(404).json({
-            error: "Unknown service"
-        });
-    }
-
+    const service = services.find(s => s.name === name);
+    if (!service) return res.status(404).json({ error: "Unknown service" });
     if (!["start", "stop", "restart"].includes(command)) {
-        return res.status(400).json({
-            error: "Invalid command"
-        });
+        return res.status(400).json({ error: "Invalid command" });
     }
-
     if (busy.has(name)) {
-        return res.status(409).json({
-            error: "Operation already in progress"
-        });
+        return res.status(409).json({ error: "Operation already in progress" });
     }
 
     busy.add(name);
-
     try {
         let pid = null;
-
         if (command === "start") {
-            const status = await checkHealth(service);
-
-            if (status !== "offline") {
-                return res.status(409).json({
-                    error: "Service is already responding"
-                });
+            if ((await checkHealth(service)) !== "offline" || managedPid(service)) {
+                return res.status(409).json({ error: "Service is already running" });
             }
-
-            if (processes.has(name)) {
-                return res.status(409).json({
-                    error: "Service process already exists"
-                });
-            }
-
-            pid = startService(service);
-        }
-
-        if (command === "stop") {
+            pid = await startService(service);
+        } else if (command === "stop") {
             await stopService(service);
-        }
-
-        if (command === "restart") {
+        } else {
             await stopService(service);
             await waitUntilOffline(service);
-            pid = startService(service);
+            pid = await startService(service);
         }
-
-        res.json({
-            name,
-            command,
-            result: "accepted",
-            pid
-        });
-
+        await updateStatuses();
+        res.json({ name, command, result: "accepted", pid });
     } catch (error) {
-        res.status(500).json({
-            error: error.message
-        });
-
+        console.error(`[${name}] ${error.message}`);
+        res.status(500).json({ error: error.message });
     } finally {
         busy.delete(name);
     }
 });
 
-// Start server
-// Graceful shutdown
-
-let shuttingDown = false;
-
 async function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
+    console.log("Stopping Service Monitor and script-managed services...");
+    clearInterval(healthTimer);
 
-    console.log("Stopping Service Monitor and managed services...");
-
-    const managedServices = services.filter(
-        service => processes.has(service.name)
-    );
-
+    // A start/restart may be executing; wait for it to complete before stopping.
+    const deadline = Date.now() + 150000;
+    while (busy.size && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
     const results = await Promise.allSettled(
-        managedServices.map(service => stopService(service))
+        services.filter(s => managedPid(s) !== null).map(s => stopService(s))
     );
-
-    results.forEach((result, index) => {
-        if (result.status === "rejected") {
-            console.error(
-                `[${managedServices[index].name}] Shutdown failed:`,
-                result.reason.message
-            );
-        }
-    });
-
+    const failed = results.some(r => r.status === "rejected");
+    for (const r of results) {
+        if (r.status === "rejected") console.error("Shutdown failure:", r.reason);
+    }
     console.log("Service Monitor shutdown complete.");
-    process.exit(results.some(r => r.status === "rejected") ? 1 : 0);
+    process.exit(failed ? 1 : 0);
 }
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-// Main API server
-
 app.listen(PORT, HOST, () => {
-    console.log(
-        `Service Monitor backend running at http://${HOST}:${PORT}`
-    );
-
+    console.log(`Service Monitor backend running at http://${HOST}:${PORT}`);
     console.log(`Configured services: ${services.length}`);
 });
 
-// Local-only shutdown server, not exposed through Vite
-
-const shutdownServer = require("node:http").createServer((req, res) => {
+// Local-only shutdown API; separate from the frontend's /api proxy.
+require("node:http").createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/shutdown") {
         res.writeHead(404);
         return res.end();
     }
-
     res.writeHead(200);
     res.end("Shutting down");
-
     setImmediate(shutdown);
-});
-
-shutdownServer.listen(3001, "127.0.0.1");
+}).listen(3001, "127.0.0.1");
